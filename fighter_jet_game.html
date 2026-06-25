@@ -1,0 +1,565 @@
+
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0f121c; display: flex; flex-direction: column; align-items: center; }
+canvas { display: block; cursor: crosshair; }
+</style>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 800, H = 600;
+
+let state = { phase: 'play' };
+let keys = new Set();
+let mouse = { x: 400, y: 300, down: false };
+
+let player, bullets, enemyBullets, drones, fighters;
+let spawnTimer, spawnFighterTimer;
+let score, level, exp, expNeeded;
+let upgOptions, fireCD;
+let stillTimer, regenTick;
+let upgSpeed, upgDamage, upgFire, upgHp;
+let evolution;
+
+const EVOL_NAMES = ["기본 전투기","쌍발 전투기","스텔스 전투기","전략 폭격기"];
+const REGEN_DELAY = 180, REGEN_RATE = 60;
+
+function init() {
+  player = { x: 400, y: 300, hp: 100, maxHp: 100, size: 22 };
+  bullets = []; enemyBullets = []; drones = []; fighters = [];
+  spawnTimer = 0; spawnFighterTimer = 0;
+  score = 0; level = 1; exp = 0; expNeeded = 100;
+  upgSpeed = 0; upgDamage = 0; upgFire = 0; upgHp = 0;
+  evolution = 0; fireCD = 0;
+  stillTimer = 0; regenTick = 0;
+  upgOptions = [];
+  state.phase = 'play';
+}
+
+function spawnDrone() {
+  let side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = Math.random()*W; y = -30; }
+  else if (side === 1) { x = Math.random()*W; y = H+30; }
+  else if (side === 2) { x = -30; y = Math.random()*H; }
+  else { x = W+30; y = Math.random()*H; }
+  let tier = Math.min(Math.floor((level-1)/3), 3);
+  let hp = 20 + tier*30;
+  let spd = 0.9 + tier*0.3;
+  let sz = 13 + tier*5;
+  let reward = 10 + tier*10;
+  drones.push({ x, y, hp, maxHp: hp, spd, sz, reward, tier, rot: 0 });
+}
+
+function spawnFighter() {
+  let side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = Math.random()*W; y = -40; }
+  else if (side === 1) { x = Math.random()*W; y = H+40; }
+  else if (side === 2) { x = -40; y = Math.random()*H; }
+  else { x = W+40; y = Math.random()*H; }
+  let tier = Math.min(Math.floor((level-5)/3), 3);
+  tier = Math.max(0, tier);
+  let hp = 60 + tier*40;
+  let spd = 0.6 + tier*0.2;
+  let sz = 18 + tier*4;
+  let reward = 40 + tier*20;
+  fighters.push({ x, y, hp, maxHp: hp, spd, sz, reward, tier,
+    fireCD: 80 + Math.floor(Math.random()*40),
+    fireTimer: Math.floor(Math.random()*80),
+    rot: 0, shootRange: 220 + tier*40 });
+}
+
+function playerShoot() {
+  let angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  let bspd = 7.0;
+  let ox = Math.cos(angle), oy = Math.sin(angle);
+  let sz = player.size;
+  if (evolution === 0) {
+    bullets.push({ x: player.x+ox*sz, y: player.y+oy*sz, dx: ox*bspd, dy: oy*bspd });
+  } else if (evolution === 1) {
+    let px = -oy*7, py = ox*7;
+    bullets.push({ x: player.x+ox*sz+px, y: player.y+oy*sz+py, dx: ox*bspd, dy: oy*bspd });
+    bullets.push({ x: player.x+ox*sz-px, y: player.y+oy*sz-py, dx: ox*bspd, dy: oy*bspd });
+  } else if (evolution === 2) {
+    [-0.15,0,0.15].forEach(da => {
+      let a2 = angle+da;
+      bullets.push({ x: player.x+Math.cos(a2)*sz, y: player.y+Math.sin(a2)*sz, dx: Math.cos(a2)*bspd, dy: Math.sin(a2)*bspd });
+    });
+  } else {
+    [-0.25,-0.12,0,0.12,0.25].forEach(da => {
+      let a2 = angle+da;
+      bullets.push({ x: player.x+Math.cos(a2)*sz, y: player.y+Math.sin(a2)*sz, dx: Math.cos(a2)*bspd, dy: Math.sin(a2)*bspd });
+    });
+  }
+}
+
+function fighterShoot(f) {
+  let angle = Math.atan2(player.y - f.y, player.x - f.x);
+  let bspd = 4.0;
+  let tier = f.tier;
+  if (tier === 0) {
+    let ox = Math.cos(angle), oy = Math.sin(angle);
+    enemyBullets.push({ x: f.x+ox*f.sz, y: f.y+oy*f.sz, dx: ox*bspd, dy: oy*bspd, tier });
+  } else if (tier === 1) {
+    [-0.2,0,0.2].forEach(da => {
+      let a2 = angle+da;
+      enemyBullets.push({ x: f.x+Math.cos(a2)*f.sz, y: f.y+Math.sin(a2)*f.sz, dx: Math.cos(a2)*bspd, dy: Math.sin(a2)*bspd, tier });
+    });
+  } else if (tier === 2) {
+    for (let i=0; i<6; i++) {
+      let a2 = angle + (i-2.5)*0.18;
+      enemyBullets.push({ x: f.x+Math.cos(a2)*f.sz, y: f.y+Math.sin(a2)*f.sz, dx: Math.cos(a2)*bspd, dy: Math.sin(a2)*bspd, tier });
+    }
+  } else {
+    for (let i=0; i<8; i++) {
+      let a2 = angle + (i-3.5)*0.2;
+      let spd2 = bspd + (i%2)*1.5;
+      enemyBullets.push({ x: f.x+Math.cos(a2)*f.sz, y: f.y+Math.sin(a2)*f.sz, dx: Math.cos(a2)*spd2, dy: Math.sin(a2)*spd2, tier });
+    }
+    let a90 = angle + Math.PI/2;
+    enemyBullets.push({ x: f.x+Math.cos(a90)*f.sz, y: f.y+Math.sin(a90)*f.sz, dx: Math.cos(a90)*3, dy: Math.sin(a90)*3, tier });
+    enemyBullets.push({ x: f.x-Math.cos(a90)*f.sz, y: f.y-Math.sin(a90)*f.sz, dx: -Math.cos(a90)*3, dy: -Math.sin(a90)*3, tier });
+  }
+}
+
+function dist(ax,ay,bx,by) { let dx=ax-bx,dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
+function clamp(v,a,b) { return Math.max(a,Math.min(b,v)); }
+
+function checkLevelup() {
+  if (exp >= expNeeded) {
+    exp -= expNeeded;
+    expNeeded = Math.floor(expNeeded * 1.45);
+    level++;
+    player.maxHp += 15;
+    player.hp = Math.min(player.hp + 20, player.maxHp);
+    if ([5,10,15].includes(level)) {
+      evolution++;
+      state.phase = 'evolve';
+    } else {
+      upgOptions = makeUpgOptions();
+      state.phase = 'upgrade';
+    }
+  }
+}
+
+function makeUpgOptions() {
+  let pool = [
+    { name:"이동속도 UP", icon:"⚡", desc:"이동 속도 +0.6", key:"speed", col:"#50c8ff" },
+    { name:"공격력 UP",   icon:"💥", desc:"총알 데미지 +5", key:"damage", col:"#ff6450" },
+    { name:"연사속도 UP", icon:"🔥", desc:"발사 간격 감소", key:"fire",   col:"#ffdc50" },
+    { name:"최대 HP UP",  icon:"❤️", desc:"최대 체력 +30",  key:"hp",    col:"#50dc78" },
+  ];
+  for (let i=pool.length-1;i>0;i--) { let j=Math.floor(Math.random()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  return pool.slice(0,3);
+}
+
+function applyUpgrade(k) {
+  if (k==='speed') upgSpeed++;
+  else if (k==='damage') upgDamage++;
+  else if (k==='fire') upgFire++;
+  else if (k==='hp') { upgHp++; player.maxHp+=30; player.hp=Math.min(player.hp+30,player.maxHp); }
+  state.phase = 'play';
+}
+
+let frame = 0;
+function update() {
+  if (state.phase !== 'play') return;
+  frame++;
+  let spd = 3.0 + upgSpeed*0.6;
+  let vx=0, vy=0;
+  if (keys.has('w')||keys.has('W')||keys.has('ArrowUp')) vy-=spd;
+  if (keys.has('s')||keys.has('S')||keys.has('ArrowDown')) vy+=spd;
+  if (keys.has('a')||keys.has('A')||keys.has('ArrowLeft')) vx-=spd;
+  if (keys.has('d')||keys.has('D')||keys.has('ArrowRight')) vx+=spd;
+  if (vx&&vy) { vx*=0.707; vy*=0.707; }
+  let px=player.x, py=player.y;
+  player.x = clamp(player.x+vx, player.size, W-player.size);
+  player.y = clamp(player.y+vy, player.size, H-player.size);
+  let moved = Math.abs(player.x-px)>0.3||Math.abs(player.y-py)>0.3;
+  if (!moved) { stillTimer++; } else { stillTimer=0; regenTick=0; }
+  if (stillTimer>=REGEN_DELAY) {
+    regenTick++;
+    if (regenTick>=REGEN_RATE) { regenTick=0; if (player.hp<player.maxHp) player.hp=Math.min(player.hp+1,player.maxHp); }
+  }
+  fireCD--;
+  if (mouse.down && fireCD<=0) { playerShoot(); fireCD=Math.max(4,20-upgFire*3); }
+
+  let spawnInterval = Math.max(30, 90-level*4);
+  spawnTimer++;
+  if (spawnTimer>=spawnInterval) { spawnDrone(); spawnTimer=0; }
+
+  if (level >= 5) {
+    let fighterInterval = Math.max(180, 400 - level*10);
+    spawnFighterTimer++;
+    if (spawnFighterTimer>=fighterInterval) { spawnFighter(); spawnFighterTimer=0; }
+  }
+
+  bullets = bullets.filter(b => {
+    b.x+=b.dx; b.y+=b.dy;
+    if (b.x<0||b.x>W||b.y<0||b.y>H) return false;
+    let dmg = 10 + upgDamage*5;
+    for (let i=drones.length-1;i>=0;i--) {
+      let d=drones[i];
+      if (dist(b.x,b.y,d.x,d.y)<d.sz+6) {
+        d.hp-=dmg;
+        if (d.hp<=0) { score+=d.reward; exp+=d.reward; drones.splice(i,1); checkLevelup(); }
+        return false;
+      }
+    }
+    for (let i=fighters.length-1;i>=0;i--) {
+      let f=fighters[i];
+      if (dist(b.x,b.y,f.x,f.y)<f.sz+6) {
+        f.hp-=dmg;
+        if (f.hp<=0) { score+=f.reward; exp+=f.reward; fighters.splice(i,1); checkLevelup(); }
+        return false;
+      }
+    }
+    return true;
+  });
+
+  enemyBullets = enemyBullets.filter(b => {
+    b.x+=b.dx; b.y+=b.dy;
+    if (b.x<0||b.x>W||b.y<0||b.y>H) return false;
+    if (dist(b.x,b.y,player.x,player.y)<player.size) {
+      let dmg = 5 + b.tier*4;
+      player.hp-=dmg; stillTimer=0;
+      if (player.hp<=0) { state.phase='gameover'; }
+      return false;
+    }
+    return true;
+  });
+
+  drones.forEach((d,di) => {
+    d.rot += 0.05*(1+d.tier*0.3);
+    let ddx=player.x-d.x, ddy=player.y-d.y;
+    let dd=Math.sqrt(ddx*ddx+ddy*ddy);
+    if (dd>0) { d.x+=ddx/dd*d.spd; d.y+=ddy/dd*d.spd; }
+    if (dist(d.x,d.y,player.x,player.y)<player.size+d.sz) {
+      let col=3+d.tier*2;
+      player.hp-=col; d.hp-=20; stillTimer=0;
+      if (d.hp<=0) { score+=d.reward; exp+=d.reward; drones.splice(di,1); checkLevelup(); }
+      if (player.hp<=0) state.phase='gameover';
+    }
+  });
+
+  fighters.forEach((f,fi) => {
+    f.rot += 0.04*(1+f.tier*0.2);
+    let ddx=player.x-f.x, ddy=player.y-f.y;
+    let dd=Math.sqrt(ddx*ddx+ddy*ddy);
+    let targetAngle = Math.atan2(ddy,ddx);
+    if (dd>120) { f.x+=Math.cos(targetAngle)*f.spd; f.y+=Math.sin(targetAngle)*f.spd; }
+    else if (dd<80) { f.x-=Math.cos(targetAngle)*f.spd*0.5; f.y-=Math.sin(targetAngle)*f.spd*0.5; }
+    f.x=clamp(f.x,f.sz,W-f.sz); f.y=clamp(f.y,f.sz,H-f.sz);
+    if (dd < f.shootRange) {
+      f.fireTimer++;
+      if (f.fireTimer>=f.fireCD) { fighterShoot(f); f.fireTimer=0; }
+    }
+    if (dist(f.x,f.y,player.x,player.y)<player.size+f.sz) {
+      player.hp-=(5+f.tier*3); f.hp-=30; stillTimer=0;
+      if (f.hp<=0) { score+=f.reward; exp+=f.reward; fighters.splice(fi,1); checkLevelup(); }
+      if (player.hp<=0) state.phase='gameover';
+    }
+  });
+}
+
+function drawGrid() {
+  ctx.strokeStyle='rgba(35,40,58,0.8)'; ctx.lineWidth=1;
+  for (let x=0;x<W;x+=50) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y=0;y<H;y+=50) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+}
+
+function drawJetShape(ctx, evol, sz, enemy) {
+  let body, accent, gun;
+  if (enemy) { body='rgb(220,60,60)'; accent='rgb(255,120,100)'; gun='rgb(255,80,80)'; }
+  else if (evol===0) { body='rgb(80,160,255)'; accent='rgb(140,200,255)'; gun='rgb(200,230,255)'; }
+  else if (evol===1) { body='rgb(60,200,160)'; accent='rgb(120,240,200)'; gun='rgb(180,255,230)'; }
+  else if (evol===2) { body='rgb(120,80,220)'; accent='rgb(180,140,255)'; gun='rgb(220,200,255)'; }
+  else { body='rgb(220,160,40)'; accent='rgb(255,210,100)'; gun='rgb(255,240,180)'; }
+  ctx.shadowBlur=0;
+  if (evol===0||enemy) {
+    ctx.fillStyle=accent;
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-sz*0.6,sz*1.1); ctx.lineTo(-sz*0.6,-sz*1.1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle=body;
+    ctx.beginPath(); ctx.ellipse(sz*0.2,0,sz*0.8,sz*0.35,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=gun; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(sz*0.6,0); ctx.lineTo(sz*1.4,0); ctx.stroke();
+  } else if (evol===1) {
+    ctx.fillStyle=accent;
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-sz*0.7,sz*1.3); ctx.lineTo(-sz*0.7,-sz*1.3); ctx.closePath(); ctx.fill();
+    ctx.fillStyle=body;
+    ctx.beginPath(); ctx.ellipse(sz*0.2,0,sz*0.9,sz*0.375,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=gun; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(sz*0.5,sz*0.3); ctx.lineTo(sz*1.5,sz*0.3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sz*0.5,-sz*0.3); ctx.lineTo(sz*1.5,-sz*0.3); ctx.stroke();
+  } else if (evol===2) {
+    ctx.fillStyle=accent;
+    ctx.beginPath(); ctx.moveTo(sz*0.8,0); ctx.lineTo(-sz*0.6,sz*1.5); ctx.lineTo(-sz*0.6,-sz*1.5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle=body;
+    ctx.beginPath(); ctx.moveTo(sz*1.0,0); ctx.lineTo(-sz*0.3,sz*0.6); ctx.lineTo(-sz*0.3,-sz*0.6); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=gun; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(sz*0.8,0); ctx.lineTo(sz*1.6,0); ctx.stroke();
+  } else {
+    ctx.fillStyle=accent;
+    ctx.beginPath(); ctx.moveTo(sz*0.4,0); ctx.lineTo(-sz*0.2,sz*0.4); ctx.lineTo(-sz*0.8,sz*1.8); ctx.lineTo(-sz*0.5,sz*0.2); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(sz*0.4,0); ctx.lineTo(-sz*0.2,-sz*0.4); ctx.lineTo(-sz*0.8,-sz*1.8); ctx.lineTo(-sz*0.5,-sz*0.2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle=body;
+    ctx.beginPath(); ctx.ellipse(sz*0.1,0,sz,sz*0.425,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=gun; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(sz*0.7,0); ctx.lineTo(sz*1.8,0); ctx.stroke();
+  }
+}
+
+function drawFighterEnemy(f) {
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  let angle = Math.atan2(player.y-f.y, player.x-f.x);
+  ctx.rotate(angle);
+  let tier = f.tier;
+  let sz = f.sz;
+  let colors = [
+    ['rgb(200,80,80)','rgb(255,130,130)','rgb(255,80,80)'],
+    ['rgb(180,60,180)','rgb(240,130,240)','rgb(220,80,220)'],
+    ['rgb(50,160,200)','rgb(120,220,255)','rgb(80,200,240)'],
+    ['rgb(200,120,30)','rgb(255,190,80)','rgb(255,160,50)'],
+  ];
+  let [body,accent,gun] = colors[tier];
+  ctx.fillStyle=accent;
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-sz*0.7,sz*1.3); ctx.lineTo(-sz*0.7,-sz*1.3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=body;
+  ctx.beginPath(); ctx.ellipse(sz*0.15,0,sz*0.95,sz*0.42,0,0,Math.PI*2); ctx.fill();
+  if (tier>=1) {
+    ctx.strokeStyle=gun; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(sz*0.4,sz*0.25); ctx.lineTo(sz*1.3,sz*0.25); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sz*0.4,-sz*0.25); ctx.lineTo(sz*1.3,-sz*0.25); ctx.stroke();
+  }
+  if (tier>=2) {
+    ctx.strokeStyle='rgba(80,200,255,0.6)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.ellipse(0,0,sz*1.1,sz*1.1,0,0,Math.PI*2); ctx.stroke();
+  }
+  if (tier>=3) {
+    ctx.strokeStyle='rgba(255,200,50,0.7)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.ellipse(0,0,sz*1.5,sz*1.5,0,0,Math.PI*2); ctx.stroke();
+    ctx.strokeStyle=gun; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(sz*0.3,sz*0.5); ctx.lineTo(sz*1.0,sz*0.9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sz*0.3,-sz*0.5); ctx.lineTo(sz*1.0,-sz*0.9); ctx.stroke();
+  }
+  ctx.restore();
+
+  let bw = f.sz*3.2;
+  ctx.fillStyle='rgba(60,15,15,0.8)';
+  ctx.beginPath(); ctx.roundRect(f.x-bw/2, f.y-f.sz-14, bw, 5, 2); ctx.fill();
+  let r = f.hp/f.maxHp;
+  ctx.fillStyle = r>0.5?'rgb(220,80,80)':r>0.25?'rgb(220,140,40)':'rgb(255,60,60)';
+  ctx.beginPath(); ctx.roundRect(f.x-bw/2, f.y-f.sz-14, bw*r, 5, 2); ctx.fill();
+  ctx.fillStyle='rgba(255,200,50,0.9)'; ctx.font='10px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('적기', f.x, f.y-f.sz-18);
+}
+
+function drawDrone(d) {
+  ctx.save();
+  ctx.translate(d.x, d.y);
+  ctx.rotate(d.rot);
+  let sz=d.sz, tier=d.tier;
+  if (tier===0) {
+    ctx.fillStyle='rgb(200,60,60)';
+    ctx.fillRect(-sz*0.3,-sz,sz*0.6,sz*2);
+    ctx.fillRect(-sz,-sz*0.3,sz*2,sz*0.6);
+    ctx.fillStyle='rgb(255,100,100)';
+    ctx.beginPath(); ctx.arc(0,0,sz*0.45,0,Math.PI*2); ctx.fill();
+  } else if (tier===1) {
+    ctx.fillStyle='rgb(200,80,60)';
+    [0,Math.PI/2,Math.PI,3*Math.PI/2].forEach(ang => {
+      ctx.save(); ctx.rotate(ang);
+      ctx.fillRect(-sz*0.25,sz*0.1,sz*0.5,sz*1.0);
+      ctx.restore();
+    });
+    ctx.fillStyle='rgb(255,120,80)'; ctx.beginPath(); ctx.arc(0,0,sz*0.5,0,Math.PI*2); ctx.fill();
+  } else if (tier===2) {
+    ctx.fillStyle='rgb(180,50,180)';
+    for (let i=0;i<6;i++) {
+      ctx.save(); ctx.rotate(i*Math.PI/3);
+      ctx.fillRect(-sz*0.2,sz*0.2,sz*0.4,sz*0.9);
+      ctx.restore();
+    }
+    ctx.fillStyle='rgb(220,100,220)'; ctx.beginPath(); ctx.arc(0,0,sz*0.55,0,Math.PI*2); ctx.fill();
+  } else {
+    ctx.fillStyle='rgb(200,140,30)';
+    for (let i=0;i<8;i++) {
+      ctx.save(); ctx.rotate(i*Math.PI/4);
+      ctx.fillRect(-sz*0.18,sz*0.3,sz*0.36,sz*0.9);
+      ctx.restore();
+    }
+    ctx.strokeStyle='rgb(255,200,60)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(0,0,sz,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle='rgb(255,180,40)'; ctx.beginPath(); ctx.arc(0,0,sz*0.55,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+  let bw=d.sz*2.8;
+  ctx.fillStyle='rgba(60,15,15,0.8)';
+  ctx.beginPath(); ctx.roundRect(d.x-bw/2,d.y-d.sz-12,bw,5,2); ctx.fill();
+  let r=d.hp/d.maxHp;
+  ctx.fillStyle=r>0.5?'rgb(220,60,60)':r>0.25?'rgb(220,140,40)':'rgb(255,60,60)';
+  ctx.beginPath(); ctx.roundRect(d.x-bw/2,d.y-d.sz-12,bw*r,5,2); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='rgb(15,18,28)'; ctx.fillRect(0,0,W,H);
+  if (state.phase==='play') {
+    drawGrid();
+    drones.forEach(drawDrone);
+    fighters.forEach(drawFighterEnemy);
+    bullets.forEach(b => {
+      ctx.fillStyle='rgb(255,240,80)';
+      ctx.beginPath(); ctx.arc(b.x,b.y,4.5,0,Math.PI*2); ctx.fill();
+    });
+    enemyBullets.forEach(b => {
+      let cols=['rgb(255,100,100)','rgb(255,140,60)','rgb(180,100,255)','rgb(255,200,50)'];
+      ctx.fillStyle=cols[Math.min(b.tier,3)];
+      let r=4+b.tier*1.5;
+      ctx.beginPath(); ctx.arc(b.x,b.y,r,0,Math.PI*2); ctx.fill();
+    });
+    let angle = Math.atan2(mouse.y-player.y, mouse.x-player.x);
+    ctx.save(); ctx.translate(player.x,player.y); ctx.rotate(angle);
+    drawJetShape(ctx, evolution, player.size, false);
+    ctx.restore();
+    drawHUD();
+  } else if (state.phase==='upgrade') {
+    drawGrid();
+    drawUpgradeScreen();
+  } else if (state.phase==='evolve') {
+    drawGrid();
+    drawEvolveScreen();
+  } else if (state.phase==='gameover') {
+    drawGameOver();
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle='rgba(25,30,45,0.9)'; ctx.fillRect(0,H-20,W,20);
+  let expW = W*(exp/expNeeded);
+  ctx.fillStyle='rgb(80,200,120)'; ctx.fillRect(0,H-20,expW,20);
+  ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font='11px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(`LV ${level}  [ ${EVOL_NAMES[evolution]} ]   EXP ${exp} / ${expNeeded}`, W/2, H-9);
+  ctx.fillStyle='rgba(25,30,45,0.9)'; ctx.beginPath(); ctx.roundRect(10,10,200,16,4); ctx.fill();
+  let hpR=player.hp/player.maxHp;
+  ctx.fillStyle=hpR>0.35?'rgb(80,180,255)':'rgb(255,120,60)';
+  ctx.beginPath(); ctx.roundRect(10,10,200*hpR,16,4); ctx.fill();
+  ctx.fillStyle='white'; ctx.font='11px sans-serif'; ctx.textAlign='left';
+  ctx.fillText(`HP  ${player.hp} / ${player.maxHp}`, 16, 21);
+  if (stillTimer>=REGEN_DELAY) { ctx.fillStyle='rgb(80,220,120)'; ctx.font='10px sans-serif'; ctx.fillText('[ 회복 중 ]',16,37); }
+  ctx.fillStyle='rgb(255,220,80)'; ctx.font='14px sans-serif'; ctx.textAlign='right';
+  ctx.fillText(`SCORE  ${score}`, W-10, 24);
+  ctx.fillStyle='rgba(120,140,180,0.8)'; ctx.font='10px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('WASD/방향키: 이동   마우스 클릭: 사격', 10, H-24);
+  if (level>=5) {
+    ctx.fillStyle='rgba(255,160,60,0.85)'; ctx.font='10px sans-serif'; ctx.textAlign='right';
+    ctx.fillText('⚠ 적 전투기 출현 가능', W-10, 36);
+  }
+  ctx.textAlign='center';
+}
+
+let hoveredUpg = -1;
+cv.addEventListener('mousemove', e => {
+  let rect = cv.getBoundingClientRect();
+  mouse.x = (e.clientX-rect.left)*(W/rect.width);
+  mouse.y = (e.clientY-rect.top)*(H/rect.height);
+  if (state.phase==='upgrade') {
+    hoveredUpg=-1;
+    upgOptions.forEach((opt,i) => {
+      let cx=160+i*240, cy=295;
+      if (mouse.x>=cx-105&&mouse.x<=cx+105&&mouse.y>=cy-90&&mouse.y<=cy+85) hoveredUpg=i;
+    });
+  }
+});
+
+cv.addEventListener('click', e => {
+  let rect = cv.getBoundingClientRect();
+  let mx=(e.clientX-rect.left)*(W/rect.width);
+  let my=(e.clientY-rect.top)*(H/rect.height);
+  if (state.phase==='upgrade' && upgOptions.length===3) {
+    upgOptions.forEach((opt,i) => {
+      let cx=160+i*240, cy=295;
+      if (mx>=cx-105&&mx<=cx+105&&my>=cy-90&&my<=cy+85) applyUpgrade(opt.key);
+    });
+  }
+  if (state.phase==='evolve') {
+    upgOptions = makeUpgOptions();
+    state.phase='upgrade';
+  }
+  if (state.phase==='play') { playerShoot(); }
+});
+
+cv.addEventListener('mousedown', e => { mouse.down=true; });
+cv.addEventListener('mouseup', e => { mouse.down=false; });
+
+document.addEventListener('keydown', e => {
+  keys.add(e.key);
+  if (state.phase==='evolve') { upgOptions=makeUpgOptions(); state.phase='upgrade'; }
+  if (state.phase==='gameover' && (e.key==='r'||e.key==='R')) init();
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys.delete(e.key); });
+
+function drawUpgradeScreen() {
+  ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgb(255,220,80)'; ctx.font='bold 26px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(`LEVEL UP!   LV ${level}`, W/2, 110);
+  ctx.fillStyle='rgb(200,220,255)'; ctx.font='13px sans-serif';
+  ctx.fillText('업그레이드를 클릭하여 선택하세요', W/2, 148);
+  upgOptions.forEach((opt,i) => {
+    let cx=160+i*240, cy=295;
+    let hovered = hoveredUpg===i;
+    ctx.fillStyle=hovered?'rgba(60,75,110,0.95)':'rgba(38,48,72,0.95)';
+    ctx.strokeStyle=hovered?'rgb(140,170,255)':'rgb(90,130,210)';
+    ctx.lineWidth=hovered?2:1.5;
+    ctx.beginPath(); ctx.roundRect(cx-105,cy-90,210,175,14); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=opt.col; ctx.font='32px sans-serif';
+    ctx.fillText(opt.icon, cx, cy-25);
+    ctx.fillStyle='white'; ctx.font='bold 14px sans-serif';
+    ctx.fillText(opt.name, cx, cy+24);
+    ctx.fillStyle='rgb(170,195,255)'; ctx.font='11px sans-serif';
+    ctx.fillText(opt.desc, cx, cy+48);
+    ctx.fillStyle='rgb(255,220,80)'; ctx.font='10px sans-serif';
+    ctx.fillText('클릭하여 선택', cx, cy+72);
+    if (hovered) { ctx.strokeStyle='rgba(140,170,255,0.3)'; ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(cx-105,cy-90,210,175,14); ctx.stroke(); }
+  });
+  cv.style.cursor='pointer';
+}
+
+function drawEvolveScreen() {
+  ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.fillRect(0,0,W,H);
+  ctx.save(); ctx.translate(W/2, H/2-30); ctx.rotate(0);
+  drawJetShape(ctx, evolution, 44, false);
+  ctx.restore();
+  ctx.fillStyle='rgb(255,220,80)'; ctx.font='bold 30px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('전투기 진화!', W/2, H/2+70);
+  ctx.fillStyle='rgb(200,220,255)'; ctx.font='18px sans-serif';
+  ctx.fillText(`${EVOL_NAMES[evolution-1]}  →  ${EVOL_NAMES[evolution]}`, W/2, H/2+105);
+  ctx.fillStyle='rgb(160,180,220)'; ctx.font='13px sans-serif';
+  ctx.fillText('클릭 또는 아무 키나 눌러 계속하세요', W/2, H/2+138);
+  cv.style.cursor='pointer';
+}
+
+function drawGameOver() {
+  ctx.fillStyle='rgb(15,18,28)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgb(255,80,80)'; ctx.font='bold 46px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('GAME OVER', W/2, H/2-70);
+  ctx.fillStyle='rgb(255,220,80)'; ctx.font='22px sans-serif';
+  ctx.fillText(`최종 점수: ${score}   |   LV ${level}  [ ${EVOL_NAMES[evolution]} ]`, W/2, H/2);
+  ctx.fillStyle='rgb(200,220,255)'; ctx.font='15px sans-serif';
+  ctx.fillText('R 키를 눌러 재시작', W/2, H/2+60);
+  cv.style.cursor='default';
+}
+
+init();
+function loop() {
+  if (state.phase==='play') cv.style.cursor='crosshair';
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
